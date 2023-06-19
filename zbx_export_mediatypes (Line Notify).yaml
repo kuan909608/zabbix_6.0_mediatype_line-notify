@@ -1,0 +1,215 @@
+zabbix_export:
+  version: '6.4'
+  media_types:
+    - name: 'Line Notify'
+      type: WEBHOOK
+      parameters:
+        - name: alert_message
+          value: '{ALERT.MESSAGE}'
+        - name: alert_subject
+          value: '{ALERT.SUBJECT}'
+        - name: event_id
+          value: '{EVENT.ID}'
+        - name: event_nseverity
+          value: '{EVENT.NSEVERITY}'
+        - name: event_source
+          value: '{EVENT.SOURCE}'
+        - name: event_update_status
+          value: '{EVENT.UPDATE.STATUS}'
+        - name: event_value
+          value: '{EVENT.VALUE}'
+        - name: notify_token
+          value: '{ALERT.SENDTO}'
+        - name: trigger_description
+          value: '{TRIGGER.DESCRIPTION}'
+        - name: trigger_id
+          value: '{TRIGGER.ID}'
+        - name: zabbix_url
+          value: '{$ZABBIX.URL}'
+      script: |
+        function sendLineNotify(message, params) {
+            var response,
+                request = new HttpRequest();
+        
+            if (typeof params.HTTPProxy === 'string' && params.HTTPProxy.trim() !== '') {
+                request.setProxy(params.HTTPProxy);
+            }
+        
+            request.addHeader('Content-Type: application/x-www-form-urlencoded');
+            request.addHeader('Authorization: Bearer ' + params.notify_token);
+        
+            var payload = {
+                "message": '\n' + message
+            };
+        
+            var formData = Object.keys(payload).map(function(key) {
+                return encodeURIComponent(key) + '=' + encodeURIComponent(payload[key]);
+            }).join('&');
+            response = request.post('https://notify-api.line.me/api/notify', formData);
+        
+            if (request.getStatus() !== 200) {
+                throw response;
+            }
+        }
+        
+        function validateParams(params) {
+            if (typeof params.notify_token !== 'string' || params.notify_token.trim() === '') {
+                throw 'Field "notify_token" cannot be empty';
+            }
+        
+            if ([0, 1, 2, 3].indexOf(parseInt(params.event_source)) === -1) {
+                throw 'Incorrect "event_source" parameter given: "' + params.event_source + '".\nMust be 0-3.';
+            }
+        
+            if (params.event_source !== '0') {
+                params.event_nseverity = '0';
+                params.event_severity = 'Not classified';
+                params.event_update_status = '0';
+            }
+        
+            if (params.event_source === '1' || params.event_source === '2') {
+                params.event_value = '1';
+            }
+        
+            if ([0, 1, 2, 3, 4, 5].indexOf(parseInt(params.event_nseverity)) === -1) {
+                throw 'Incorrect "event_nseverity" parameter given: ' + params.event_nseverity + '\nMust be 0-5.';
+            }
+        
+            if (params.event_update_status !== '0' && params.event_update_status !== '1') {
+                throw 'Incorrect "event_update_status" parameter given: ' + params.event_update_status + '\nMust be 0 or 1.';
+            }
+        
+            if (params.event_value !== '0' && params.event_value !== '1') {
+                throw 'Incorrect "event_value" parameter given: ' + params.event_value + '\nMust be 0 or 1.';
+            }
+        
+            if (isNaN(params.trigger_id) && params.event_source === '0') {
+                throw 'field "trigger_id" is not a number';
+            }
+        
+            if (typeof params.zabbix_url !== 'string' || params.zabbix_url.trim() === '') {
+                throw 'Field "zabbix_url" cannot be empty';
+            }
+        
+            if (!/^(http|https):\/\/.+/.test(params.zabbix_url)) {
+                throw 'Field "zabbix_url" must contain a schema' + params.zabbix_url;
+            }
+        }
+        
+        function getZabbixProblemLink(params) {
+            return params.zabbix_url + (params.zabbix_url.endsWith('/') ? '' : '/') + 'tr_events.php?triggerid=' + params.trigger_id + '&eventid=' + params.event_id;    
+        }
+        
+        try {
+            var params = JSON.parse(value);
+        
+            validateParams(params);
+        
+            severity_emoji = [
+                "\u26AA",
+                "\uD83D\uDD35",
+                "\uD83D\uDFE4",
+                "\uD83D\uDFE1",
+                "\uD83D\uDFE0",
+                "\uD83D\uDD34",
+            ];
+        
+            // If its a trigger and a recovery operation and not an update operation.
+            if (params.event_source === '0' && params.event_value === '0' && params.event_update_status === '0') {
+                var line_message = [
+                    {
+                        "type": "text",
+                        "text": '\u2705 ' + params.alert_subject + '\n\n' + params.alert_message + '\n' + params.trigger_description + '\n\n' + getZabbixProblemLink(params)
+                    }
+                ];
+            }
+            // If its a trigger and its a problem.
+            else if (params.event_source === '0' && params.event_value === '1') {
+                var line_message = [
+                    {
+                        "type": "text",
+                        "text": severity_emoji[params.event_nseverity] + ' ' + params.alert_subject + '\n\n' + params.alert_message + '\n' + params.trigger_description + '\n\n' + getZabbixProblemLink(params)
+                    }
+                ];
+            }
+            // If its a trigger and its an update operation.
+            else if (params.event_source === '0' && params.event_update_status === '1') {
+                var line_message = [
+                    {
+                        "type": "text",
+                        "text": '\u2733 ' + severity_emoji[params.event_nseverity] + ' ' + params.alert_subject + '\n\n' + params.alert_message + '\n' + params.trigger_description + '\n\n' + getZabbixProblemLink(params)
+                    }
+                ];
+            }
+            else {
+                var line_message = [
+                    {
+                        "type": "text",
+                        "text": params.alert_subject + '\n\n' + params.alert_message + '\n'
+                    }
+                ];
+            }
+        
+            sendLineNotify(line_message[0].text, params);
+        
+            return 'OK';
+        }
+        catch (err) {
+            Zabbix.log(4, '[ Line Webhook ] Line notification failed : ' + err);
+            throw 'Line notification failed : ' + err;
+        }
+      description: |
+        由 Line 腳本修改
+        
+        By kuan
+      message_templates:
+        - event_source: TRIGGERS
+          operation_mode: PROBLEM
+          subject: '問題：{EVENT.NAME}'
+          message: |
+            問題於 {EVENT.DATE} 的 {EVENT.TIME} 開始
+            問題名稱：{EVENT.NAME}
+            主機：{HOST.NAME}
+            嚴重性：{EVENT.SEVERITY}
+            操作資料：{EVENT.OPDATA}
+            原始問題 ID：{EVENT.ID}
+        - event_source: TRIGGERS
+          operation_mode: RECOVERY
+          subject: '{EVENT.NAME} 花了 {EVENT.DURATION} 解決'
+          message: |
+            問題已在 {EVENT.RECOVERY.DATE} 的 {EVENT.RECOVERY.TIME} 解決
+            問題名稱： {EVENT.NAME}
+            問題持續時間： {EVENT.DURATION}
+            主機：{HOST.NAME}
+            嚴重性：{EVENT.SEVERITY}
+            原始問題 ID：{EVENT.ID}
+        - event_source: TRIGGERS
+          operation_mode: UPDATE
+          subject: '在經過 {EVENT.AGE} 時更新問題：{EVENT.NAME}'
+          message: |
+            {USER.FULLNAME} {EVENT.UPDATE.ACTION} 問題發生在 {EVENT.UPDATE.DATE} 的 {EVENT.UPDATE.TIME}。
+            {EVENT.UPDATE.MESSAGE}
+            
+            當前問題狀態為 {EVENT.STATUS}，存在時間為 {EVENT.AGE}，已確認：{EVENT.ACK.STATUS}.
+        - event_source: DISCOVERY
+          operation_mode: PROBLEM
+          subject: '發現：{DISCOVERY.DEVICE.STATUS} {DISCOVERY.DEVICE.IPADDRESS}'
+          message: |
+            發現規則：{DISCOVERY.RULE.NAME}
+            
+            設備 IP：{DISCOVERY.DEVICE.IPADDRESS}
+            設備 DNS：{DISCOVERY.DEVICE.DNS}
+            設備狀態：{DISCOVERY.DEVICE.STATUS}
+            設備正常運行時間：{DISCOVERY.DEVICE.UPTIME}
+            
+            設備服務名稱：{DISCOVERY.SERVICE.NAME}
+            設備服務端口：{DISCOVERY.SERVICE.PORT}
+            設備服務狀態：{DISCOVERY.SERVICE.STATUS}
+            設備服務正常運行時間：{DISCOVERY.SERVICE.UPTIME}
+        - event_source: AUTOREGISTRATION
+          operation_mode: PROBLEM
+          subject: '自動註冊：{HOST.HOST}'
+          message: |
+            主機名稱：{HOST.HOST}
+            主機 IP：{HOST.IP}
+            Agent 端口：{HOST.PORT}
